@@ -21,6 +21,7 @@ from .comm_utils import (
     sync_threads,
 )
 from .device_trap import device_trap_if
+from .._platform import is_rocm
 
 
 @triton.jit
@@ -954,3 +955,11 @@ def _triton_dispatch_routing_combine(  # noqa: C901
                 tl.store(fwd_gather_ptrs_ptr + pad_block, 0, mask=pad_mask)
                 tl.store(scatter_ptrs_ptr + pad_block, 0, mask=pad_mask)
                 pad_offset += block_size_t
+
+
+if is_rocm():
+    from ._hip_comm_utils import grid_arrive_and_wait
+
+    @triton.jit
+    def _decode_routing_arrive_and_wait(completed_ctas_ptr, world_size):  # noqa: F811
+        grid_arrive_and_wait(completed_ctas_ptr, world_size)

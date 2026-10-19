@@ -331,3 +331,16 @@ def wait_signal(addrs, sem: tl.constexpr):
         )
     else:
         raise RuntimeError(f"Unrecognized sem: {sem}")
+
+
+# ROCm has no PTX; rebind the primitives used by the Dist-MoE kernels to their
+# CTA-uniform HIP equivalents before importers resolve these names.
+from .._platform import is_rocm  # noqa: E402
+
+if is_rocm():
+    from ._hip_comm_utils import (  # noqa: E402, F401, F811
+        get_flat_tid,
+        send_signal,
+        sync_threads,
+        wait_signal,
+    )

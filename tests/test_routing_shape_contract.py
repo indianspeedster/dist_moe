@@ -19,6 +19,29 @@ import pytest
 import torch
 import torch.distributed as dist
 
+# ROCm aborts the whole process on any device trap instead of raising a
+# recoverable error, and buffered device printf output is lost with it.
+_ROCM_DEVICE_FAULTS = ("Memory access fault", "HSA_STATUS_ERROR")
+
+
+def _assert_rocm_fail_stop(
+    completed: subprocess.CompletedProcess, output: str, min_faulting_ranks: int
+) -> None:
+    """Assert the ROCm trap contract: the job aborts on a device fault.
+
+    Args:
+        completed: Finished worker launcher process.
+        output: Combined worker stdout and stderr.
+        min_faulting_ranks: Ranks that must report a device fault.
+    """
+    assert completed.returncode != 0, output
+    faults = sum(
+        line.count(fault) for line in output.splitlines() for fault in _ROCM_DEVICE_FAULTS
+    )
+    assert faults >= min_faulting_ranks, output
+    assert "did not" not in output, output
+
+
 _EXPECTED_TRAP_ERRORS = (
     "device-side assert",
     "illegal instruction",
@@ -277,6 +300,9 @@ def test_unequal_peer_token_counts_trap_before_routing(inference: bool) -> None:
     ]
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     output = completed.stdout + completed.stderr
+    if torch.version.hip is not None:
+        _assert_rocm_fail_stop(completed, output, min_faulting_ranks=4)
+        return
     assert completed.returncode == 0, output
     assert output.count("EXPECTED_DIST_MOE_TOKEN_COUNT_TRAP") == 4, output
 
@@ -302,6 +328,10 @@ def test_scratch_capacity_overflow_traps_before_execution(
     ]
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     output = completed.stdout + completed.stderr
+    if torch.version.hip is not None:
+        # Only the overflowing rank is guaranteed to trap.
+        _assert_rocm_fail_stop(completed, output, min_faulting_ranks=1)
+        return
     assert completed.returncode != 0, output
     assert "EXPECTED_DIST_MOE_SCRATCH_CAPACITY_TRAP" in output, output
     assert "DistMoE scratch capacity exceeded" in output, output
@@ -335,6 +365,9 @@ def test_debug_expert_id_validation_traps(
     ]
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     output = completed.stdout + completed.stderr
+    if torch.version.hip is not None:
+        _assert_rocm_fail_stop(completed, output, min_faulting_ranks=1)
+        return
     assert completed.returncode != 0, output
     assert "DistMoE expert ID is outside [-1, num_experts)" in output, output
 

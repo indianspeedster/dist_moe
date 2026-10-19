@@ -6,11 +6,12 @@ from _common import close, create_config, initialize_inputs
 
 inputs = initialize_inputs(requires_grad=False)
 context = None
+block_formats = [dist_moe.BlockScaledFormat.MXFP8_E4M3]
+# NVFP4 (E4M3-scaled FP4) has no AMD hardware path; ROCm runs MXFP8 only.
+if torch.version.hip is None:
+    block_formats.append(dist_moe.BlockScaledFormat.NVFP4)
 try:
-    for block_format in (
-        dist_moe.BlockScaledFormat.MXFP8_E4M3,
-        dist_moe.BlockScaledFormat.NVFP4,
-    ):
+    for block_format in block_formats:
         policy = dist_moe.BlockScaledConfig(format=block_format, pipeline="mega")
         config = create_config(inputs, inference=True, block_scaled=policy)
         context = dist_moe.create_context(

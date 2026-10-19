@@ -57,9 +57,14 @@ from dist_moe.kernels import (
     config as grouped_gemm_config_impl,
     dist_grouped_gemm as dist_grouped_gemm_impl,
     grouped_gemm as grouped_gemm_impl,
-    grouped_gemm_kernel as grouped_gemm_kernel_impl,
     mega_blockscaled_grouped_gemm as mega_impl,
 )
+from dist_moe.kernels._platform import is_rocm
+
+try:
+    from dist_moe.kernels import grouped_gemm_kernel as grouped_gemm_kernel_impl
+except ImportError:  # ROCm builds provide Triton kernels instead of CuTe.
+    grouped_gemm_kernel_impl = None
 from torch._higher_order_ops.effects import has_effects
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.device_mesh import init_device_mesh
@@ -80,6 +85,28 @@ def _is_blackwell() -> bool:
         ``True`` when CUDA is available with compute capability 10.0 or newer.
     """
     return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10
+
+
+def _is_mi355x() -> bool:
+    """Return whether the current process runs on an AMD MI355X (gfx950).
+
+    Returns:
+        ``True`` for a ROCm build whose current device is gfx950.
+    """
+    return (
+        is_rocm()
+        and torch.cuda.is_available()
+        and torch.cuda.get_device_properties().gcnArchName.startswith("gfx950")
+    )
+
+
+def _has_dist_moe_gpu() -> bool:
+    """Return whether the current device runs the Dist-MoE kernels.
+
+    Returns:
+        ``True`` on Blackwell (CuTe kernels) or MI355X (ROCm Triton kernels).
+    """
+    return _is_blackwell() or _is_mi355x()
 
 
 def _relative_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
@@ -480,6 +507,7 @@ class DistMoeConfigTest(unittest.TestCase):
                 self.assertEqual(launch_multiple, expected_launch)
                 self.assertEqual(expected_routing % launch_multiple, 0)
 
+    @unittest.skipIf(is_rocm(), "CuTe Mega launcher implementation detail")
     def test_mega_bprop_rejects_swap_ab_paged_scale_rows(self) -> None:
         """Mega DGRAD+WGRAD rejects SWAP_AB tiles with paged row scales.
 
@@ -615,6 +643,7 @@ class DistMoeConfigTest(unittest.TestCase):
                     block_m,
                 )
 
+    @unittest.skipIf(is_rocm(), "CuTe TMEM implementation detail")
     def test_wide_tmem_load_workaround_targets_blackwell(self) -> None:
         """Apply the TMEM-load cap to both Blackwell targets and nothing else."""
         check = grouped_gemm_kernel_impl._tmem_ld_wide_fragment_nvvm_broken
@@ -644,6 +673,7 @@ class DistMoeConfigTest(unittest.TestCase):
             1,
         )
 
+    @unittest.skipIf(is_rocm(), "CuTe TMEM implementation detail")
     def test_wide_tmem_load_workaround_caps_registers_per_thread(self) -> None:
         """Cap each recognized load shape without widening narrow atoms."""
         self.assertIsNone(
@@ -675,6 +705,7 @@ class DistMoeConfigTest(unittest.TestCase):
                     self.assertIsNone(capped, (op_type, repeat))
         self.assertIsNone(grouped_gemm_kernel_impl._capped_tmem_ld_repetition(object()))
 
+    @unittest.skipIf(is_rocm(), "CuTe launch-preset implementation detail")
     def test_deep_prefill_uses_measured_training_pipeline(self) -> None:
         """Large inference dispatch reuses the measured deep pipeline."""
         config = dist_grouped_gemm_impl._resolve_dist_grouped_gemm_config(
@@ -1063,10 +1094,10 @@ class DistMoeConfigTest(unittest.TestCase):
         plan = dist_moe.plan_memory(config, ep_size=2)
         self.assertGreater(plan.total_activation_bytes, 0)
         self.assertGreater(plan.host_scratch_bytes, 0)
-        for block_format in (
-            dist_moe.BlockScaledFormat.MXFP8_E4M3,
-            dist_moe.BlockScaledFormat.NVFP4,
-        ):
+        block_formats = [dist_moe.BlockScaledFormat.MXFP8_E4M3]
+        if not is_rocm():  # NVFP4 has no AMD hardware path.
+            block_formats.append(dist_moe.BlockScaledFormat.NVFP4)
+        for block_format in block_formats:
             with self.subTest(format=block_format):
                 inference_config = dataclasses.replace(
                     config,
@@ -1486,7 +1517,7 @@ class DistMoeBufferTest(unittest.TestCase):
 
 @pytest.mark.gpus_needed_1
 @pytest.mark.gb10x
-@unittest.skipUnless(_is_blackwell(), "Blackwell CUDA device required")
+@unittest.skipUnless(_has_dist_moe_gpu(), "Blackwell or MI355X device required")
 class DistMoeKernelTest(unittest.TestCase):
     """Numerical tests for CuTe grouped GEMM and distributed MoE."""
 
@@ -1670,6 +1701,7 @@ class DistMoeKernelTest(unittest.TestCase):
         self.assertTrue(any(tensor is prepared.global_scale for tensor in storage))
         self.assertTrue(any(tensor is prepared.global_scale_inv for tensor in storage))
 
+    @unittest.skipIf(is_rocm(), "NVFP4 has no AMD hardware path")
     def test_nvfp4_token_scale_writes_directly_to_strided_output(self) -> None:
         """Dynamic NVFP4 quantization writes its inverse scale in place."""
         rows, cols = 32, 256
@@ -2436,11 +2468,12 @@ class DistMoeKernelTest(unittest.TestCase):
 
             return run
 
-        cases = (
+        cases = [
             (dist_moe.BlockScaledFormat.MXFP8_E4M3, False),
             (dist_moe.BlockScaledFormat.MXFP8_E4M3, True),
-            (dist_moe.BlockScaledFormat.NVFP4, True),
-        )
+        ]
+        if not is_rocm():  # NVFP4 has no AMD hardware path.
+            cases.append((dist_moe.BlockScaledFormat.NVFP4, True))
         for block_format, inference in cases:
             for pipeline in ("staged", "mega"):
                 with self.subTest(
@@ -2736,11 +2769,13 @@ class DistMoeKernelTest(unittest.TestCase):
                 """Fail before a storage-free source can enter a data operation."""
                 raise RuntimeError(f"storage-free logical weight entered {func}")
 
-        for block_format, inference in (
+        cases = [
             (dist_moe.BlockScaledFormat.MXFP8_E4M3, False),
             (dist_moe.BlockScaledFormat.MXFP8_E4M3, True),
-            (dist_moe.BlockScaledFormat.NVFP4, True),
-        ):
+        ]
+        if not is_rocm():  # NVFP4 has no AMD hardware path.
+            cases.append((dist_moe.BlockScaledFormat.NVFP4, True))
+        for block_format, inference in cases:
             for pipeline in ("staged", "mega"):
                 policy = dist_moe.BlockScaledConfig(
                     format=block_format, pipeline=pipeline
@@ -4137,6 +4172,7 @@ class DistMoeKernelTest(unittest.TestCase):
                 replayed_outputs.append(actual_TD)
             self.assertFalse(torch.equal(replayed_outputs[0], replayed_outputs[1]))
 
+    @unittest.skipIf(is_rocm(), "NVFP4 has no AMD hardware path")
     def test_nvfp4_inference_cuda_graph_matrix_matches_eager(self) -> None:
         """Match staged/Mega and plain/clamped NVFP4 replay to eager bitwise."""
         for pipeline in ("staged", "mega"):
@@ -4405,8 +4441,8 @@ class DistMoeKernelTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    torch.cuda.device_count() >= 2 and _is_blackwell(),
-    "two Blackwell CUDA devices required",
+    torch.cuda.device_count() >= 2 and _has_dist_moe_gpu(),
+    "two Blackwell or MI355X devices required",
 )
 @pytest.mark.gpus_needed_2
 @pytest.mark.gb10x
@@ -5129,6 +5165,7 @@ class DistMoeTwoRankTest(unittest.TestCase):
         self.assertCountEqual(seen_wgrads, ["w2", "w13"])
         self.assertEqual(len(preprocess_calls), 4)
 
+    @unittest.skipIf(is_rocm(), "NVFP4 has no AMD hardware path")
     @with_comms
     def test_nvfp4_inference_exercises_peer_paths(self) -> None:
         """Bound prepared NVFP4 inference against the routed reference.

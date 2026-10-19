@@ -20,6 +20,7 @@ from ._buffers import (
     _routing_ids_view,
     SymmetricMemoryBuffer,
 )
+from .kernels._platform import is_rocm
 from .kernels.config import num_sms_per_device
 from .kernels.triton.dist_dispatch_routing_kernel import (
     _triton_clear_decode_routing_state,
@@ -622,7 +623,10 @@ def launch_prepared_decode_routing(
         BLOCK_LOCAL_EXPERTS=triton.next_power_of_2(prepared.num_local_experts),
         BLOCK_WORLD_SIZE=triton.next_power_of_2(prepared.world_size),
         num_warps=max(1, min(block_slots // 32, _DECODE_ROUTING_MAX_WARPS)),
-        launch_cooperative_grid=True,
+        # One CTA per source rank is always co-resident. ROCm's cooperative
+        # queue corrupts HSA teardown at process exit, so ROCm launches the
+        # same grid normally.
+        launch_cooperative_grid=not is_rocm(),
     )
     return prepared.output
 

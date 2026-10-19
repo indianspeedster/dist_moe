@@ -13,10 +13,17 @@ from typing import Any
 from unittest import mock
 
 import dist_moe
-import dist_moe._vmm as vmm_impl
-import dist_moe.api as api_impl
 import pytest
 import torch
+
+if torch.version.hip is not None:
+    pytest.skip(
+        "VMM host scratch uses the CUDA driver VMM API, which ROCm lacks",
+        allow_module_level=True,
+    )
+
+import dist_moe._vmm as vmm_impl  # noqa: E402
+import dist_moe.api as api_impl  # noqa: E402
 import torch.distributed as dist
 import torch.testing._internal.distributed.fake_pg  # noqa: F401
 from dist_moe._vmm import (

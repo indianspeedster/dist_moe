@@ -1045,3 +1045,11 @@ def sigmoid(x, FAST_MATH: tl.constexpr = False):
     if FAST_MATH:
         return rcp_approx_ftz_f32(1.0 + tl.exp(-x))
     return rcp_rn_f32(1.0 + libdevice.exp(-x))
+
+
+# ROCm has no PTX: rebind the helpers (including those used by sigmoid above)
+# to their Triton equivalents. Triton resolves callee globals at compile time.
+from .._platform import is_rocm  # noqa: E402
+
+if is_rocm():
+    from ._hip_fp_math import *  # noqa: E402, F401, F403

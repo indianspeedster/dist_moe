@@ -211,3 +211,48 @@ def triton_symm_mem_barrier_multimem_ptrs(
             world_size=n_ranks,
             num_warps=1,
         )
+
+
+from .._platform import is_rocm  # noqa: E402
+
+if is_rocm():
+
+    @triton.jit(do_not_specialize=["local_rank"])
+    def _triton_symm_mem_barrier(  # noqa: F811
+        signal_pad_ptrs,
+        local_rank,
+        conditional_execution_ptr,
+        world_size: tl.constexpr,
+        channel: tl.constexpr,
+    ):
+        """ROCm signal-pad barrier with the same pad protocol as above.
+
+        Triton on AMD has no per-lane thread index, so one CTA-uniform issuer
+        first signals every peer and then waits for every peer's signal.
+        """
+        if conditional_execution_ptr is not None:
+            cond_val = tl.load(conditional_execution_ptr)
+            if cond_val == 0:
+                return
+
+        signal_pad_ptrs = signal_pad_ptrs.to(tl.pointer_type(tl.uint64))
+        local_signal_pad_ptr = tl.load(signal_pad_ptrs + local_rank).to(
+            tl.pointer_type(tl.uint32)
+        )
+        sync_threads()
+        for peer in tl.static_range(world_size):
+            if peer != local_rank:
+                peer_signal_pad_ptr = tl.load(signal_pad_ptrs + peer).to(
+                    tl.pointer_type(tl.uint32)
+                )
+                send_signal(
+                    peer_signal_pad_ptr + channel * world_size + local_rank,
+                    sem="acq_rel",
+                )
+        for peer in tl.static_range(world_size):
+            if peer != local_rank:
+                wait_signal(
+                    local_signal_pad_ptr + channel * world_size + peer,
+                    sem="acq_rel",
+                )
+        sync_threads()

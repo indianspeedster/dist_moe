@@ -36,6 +36,10 @@ graph-stable PyTorch operations needed to execute routed experts.
 All supported modes work with non-strict `make_fx`, CUDA graphs, and optional
 VMM host-backed scratch. Training modes include forward and backward.
 
+AMD Instinct MI355X (ROCm) runs BF16 and MXFP8 training and inference through
+a Triton backend with the same API; NVFP4 and VMM host-backed scratch are not
+available there. See [AMD ROCm (MI355X) backend](docs/rocm.md).
+
 The package also supports prepared MXFP8 and NVFP4 weights, device-selected
 activation slots, plain and clamped SwiGLU, fused post-expert RMSNorm, clip
 statistics, and optional in-place accumulation into standard
@@ -76,6 +80,10 @@ The initial release is validated with this runtime:
 | Framework | Python 3.12; PyTorch 2.14.0+cu130 |
 | GPU runtime | CUDA toolkit 13.0.3.0; NVRTC 13.0.88; CUDA Python 13.4.1; NCCL 2.30.7 |
 | Kernel toolchain | Triton 3.8 or 3.9; NVIDIA CUTLASS DSL 4.6.1 |
+
+On ROCm, install with `python -m pip install --no-deps -e .` into an
+environment that already provides ROCm PyTorch and Triton; see
+[AMD ROCm (MI355X) backend](docs/rocm.md#install-and-run).
 
 The PyTorch wheel runtime and the toolkit used for JIT compilation are separate
 compatibility requirements. Importing `dist_moe` does not initialize CUDA or a
@@ -745,6 +753,7 @@ Then use the focused guides as needed:
 - [BF16 kernel design](docs/bf16_kernel_design.md)
 - [MXFP8 kernel design](docs/mxfp8_kernel_design.md)
 - [NVFP4 kernel design](docs/nvfp4_kernel_design.md)
+- [AMD ROCm (MI355X) backend](docs/rocm.md)
 
 <a id="acknowledgements"></a>
 ## Acknowledgements

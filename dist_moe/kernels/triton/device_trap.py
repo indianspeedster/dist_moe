@@ -26,3 +26,9 @@ def device_trap_if(condition):
         is_pure=False,
         pack=1,
     )
+
+
+from .._platform import is_rocm  # noqa: E402
+
+if is_rocm():
+    from ._hip_comm_utils import device_trap_if  # noqa: E402, F401, F811

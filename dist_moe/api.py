@@ -1066,7 +1066,18 @@ def _resolve_vmm_physical_plan(
 
     Returns:
         Plan containing exact physical section sizes and virtual range size.
+
+    Raises:
+        NotImplementedError: On ROCm, which has no CUDA-driver VMM binding.
     """
+    from .kernels._platform import is_rocm
+
+    if is_rocm():
+        raise NotImplementedError(
+            "VMM host-backed scratch uses the CUDA driver VMM API and is not "
+            "supported on ROCm; size device_scratch_capacity_factor for the "
+            "routing load instead"
+        )
     from ._vmm import (
         get_vmm_allocation_granularity,
     )
